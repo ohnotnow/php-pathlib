@@ -24,13 +24,17 @@ file_put_contents($cfg, json_encode(['debug' => true]));
 ```php
 use Ohffs\PhpPathlib\Path;
 
+Path::setAutoExpandTilde(); // optional: call once at bootstrap to expand "~"
+
 $cfg = Path::of('~/myapp')
     ->joinpath('config', 'settings.json');
 
 $cfg->writeText(json_encode(['debug' => true]));
 ```
 
-You get consistent separators, `~/` expansion, easy joins, and readable code you can test safely.
+You get consistent separators, easy joins, and readable code you can test safely.
+
+> **Heads-up:** PHP itself doesn’t expand `~`. Either call `expanduser()` before filesystem operations, or enable auto-expansion in your app (see Behaviour details).
 
 ---
 
@@ -38,6 +42,8 @@ You get consistent separators, `~/` expansion, easy joins, and readable code you
 
 ```php
 use Ohffs\PhpPathlib\Path;
+
+Path::setAutoExpandTilde(); // optional: expand "~" automatically
 
 // Construct & chain
 $project  = Path::of('~/projects/example');
@@ -54,7 +60,7 @@ $readme->name();    // "README.md"
 $readme->stem();    // "README"
 $readme->suffix();  // "md" (no leading dot)
 $project->parent(); // Path("~/projects")
-$project->parts();  // ["~", "projects", "example"] after expanduser() you get absolute parts
+$project->parts();  // absolute parts after expanduser()
 
 // IO
 $config->writeText('{"debug":true}');
@@ -139,10 +145,16 @@ Path::of('/x/y/../z/./a')->resolve();  // /x/z/a
 
 ## Behaviour details
 
+* **`~` (tilde) expansion**: PHP itself doesn’t expand `~`. Either call `expanduser()` before filesystem operations, **or enable auto-expansion** once in your bootstrap: `Path::setAutoExpandTilde(true);`.
+
 * **Separators**: accepts `/` and `\\` in inputs; outputs use your OS separator for real FS calls. Logical string helpers normalise sensibly.
+
 * **Dotfiles**: `.env`/`.gitignore` are treated as *no extension*; `suffix()` returns `''`, `stem()` returns the whole name.
+
 * **`glob()`**: non‑recursive; uses PHP’s `glob()` under the hood; returns `Path[]` with *logical* paths (no temp prefixes).
+
 * **`resolve()`**: if the actual path exists, uses `realpath()`; otherwise performs a pure string normalisation (`.`/`..`).
+
 * **Safety**: in fake mode, even logical absolutes are sandboxed under the temp base.
 
 ---
@@ -190,10 +202,9 @@ Path::of('/x/y/../z/./a')->resolve();  // /x/z/a
 
 ## Requirements
 
-* PHP **7.4+** (typed properties & arrow functions)
+* PHP **8.0+** (typed properties & arrow functions)
 * No runtime dependencies
 
 ## License
 
 MIT — see `LICENSE`.
-

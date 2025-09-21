@@ -4,10 +4,12 @@ use Ohffs\PhpPathlib\Path;
 
 beforeEach(function () {
     $this->fs = \Ohffs\PhpPathlib\Path::fake();
+    Path::setAutoExpandTilde(false);
 });
 
 afterEach(function () {
     unset($this->fs);
+    Path::setAutoExpandTilde(false); // just in case
 });
 
 test('creates path objects correctly', function () {
@@ -260,4 +262,51 @@ test('glob returns logical paths', function () {
 test('name returns last segment for directories', function () {
     $dir = Path::of('/a/b/'); // trailing slash
     expect($dir->name())->toBe('b');
+});
+
+// Helper to compute expected expanded home dir (mirrors the library logic)
+function homeDirForTests(): ?string {
+    $home = getenv('HOME') ?: ($_SERVER['HOME'] ?? null)
+        ?: getenv('USERPROFILE')
+        ?: ((getenv('HOMEDRIVE') && getenv('HOMEPATH')) ? getenv('HOMEDRIVE') . getenv('HOMEPATH') : null);
+    if (!$home && function_exists('posix_getpwuid')) {
+        $home = posix_getpwuid(posix_getuid())['dir'] ?? null;
+    }
+    return $home ?: null;
+}
+
+test('tilde is NOT expanded by default', function () {
+    // Given autoExpandTilde = false
+    Path::setAutoExpandTilde(false);
+
+    $p = Path::of('~/noexpand/example.txt');
+    $p->writeText('ok');
+
+    // The file should live under a literal "~" directory inside the fake base
+    $base = rtrim($this->fs->base(), DIRECTORY_SEPARATOR);
+    $expected = $base . DIRECTORY_SEPARATOR . '~' . DIRECTORY_SEPARATOR . 'noexpand' . DIRECTORY_SEPARATOR . 'example.txt';
+
+    expect($p->exists())->toBeTrue();
+    expect(is_file($expected))->toBeTrue();
+});
+
+test('tilde IS expanded when autoExpandTilde is enabled', function () {
+    Path::setAutoExpandTilde(true);
+
+    $p = Path::of('~/autoexp/example.txt');
+    $p->writeText('ok');
+
+    $base = rtrim($this->fs->base(), DIRECTORY_SEPARATOR);
+    $home = homeDirForTests();
+    // Build the expected actual path under the fake base using OS separators
+    $logicalExpanded = $home . '/autoexp/example.txt';
+    $logicalExpanded = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $logicalExpanded);
+    $expected = $base . DIRECTORY_SEPARATOR . ltrim($logicalExpanded, DIRECTORY_SEPARATOR);
+
+    // It should NOT be created under a literal "~" directory…
+    $notExpected = $base . DIRECTORY_SEPARATOR . '~' . DIRECTORY_SEPARATOR . 'autoexp' . DIRECTORY_SEPARATOR . 'example.txt';
+
+    expect($p->exists())->toBeTrue();
+    expect(is_file($expected))->toBeTrue();
+    expect(is_file($notExpected))->toBeFalse();
 });

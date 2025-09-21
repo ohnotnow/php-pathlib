@@ -9,6 +9,7 @@ final class Path
 {
     private string $path;
     private static ?string $base = null;
+    private static bool $autoExpandTilde = false;
 
     /**
      * Constructor
@@ -24,6 +25,11 @@ final class Path
     public static function of(string $path): self
     {
         return new self($path);
+    }
+
+    public static function setAutoExpandTilde(bool $on = true): void
+    {
+        self::$autoExpandTilde = $on;
     }
 
     /**
@@ -332,6 +338,17 @@ final class Path
         return $this;
     }
 
+    private static function homeDir(): ?string
+    {
+        $home = getenv('HOME') ?: ($_SERVER['HOME'] ?? null)
+            ?: getenv('USERPROFILE')
+            ?: ((getenv('HOMEDRIVE') && getenv('HOMEPATH')) ? getenv('HOMEDRIVE') . getenv('HOMEPATH') : null);
+        if (!$home && function_exists('posix_getpwuid')) {
+            $home = posix_getpwuid(posix_getuid())['dir'] ?? null;
+        }
+        return $home ?: null;
+    }
+
     /**
      * Resolve to a normalized logical path (doesn't escape the fake base).
      * If the actual path exists on a real FS, use realpath for normalization.
@@ -381,11 +398,20 @@ final class Path
      */
     private function actual(): string
     {
-        if (self::$base === null) {
-            return $this->path;
+        $logical = $this->path;
+
+        if (self::$autoExpandTilde && isset($logical[0]) && $logical[0] === '~') {
+            $home = self::homeDir();
+            if ($home) {
+                $logical = $home . substr($logical, 1);
+            }
         }
-        // Always sandbox under the base
-        $relative = ltrim($this->normalizeSeparators($this->path), '/\\');
+
+        if (self::$base === null) {
+            return $this->normalizeSeparators($logical);
+        }
+
+        $relative = ltrim($this->normalizeSeparators($logical), '/\\');
         return rtrim(self::$base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $relative;
     }
 
