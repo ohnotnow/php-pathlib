@@ -2,276 +2,461 @@
 
 namespace Ohffs\PhpPathlib;
 
-class Path
+use RecursiveIteratorIterator;
+use RecursiveDirectoryIterator;
+
+final class Path
 {
     private string $path;
-    private static ?string $fakeRoot = null;
+    private static ?string $base = null;
 
-    public function __construct(string $path = '')
+    /**
+     * Constructor
+     */
+    public function __construct(string $path)
     {
-        $this->path = $this->normalize($path ?: getcwd());
+        $this->path = $path;
     }
 
-    public function __toString(): string
-    {
-        return $this->path;
-    }
-
-    // Static constructor for fluent API
+    /**
+     * Static factory method
+     */
     public static function of(string $path): self
     {
         return new self($path);
     }
 
-    // Testing helpers
-    public static function fake(): FakePath
+    /**
+     * Enable fake filesystem mode for testing.
+     *
+     * Returns a guard object that will automatically clean up the fake base
+     * when destroyed (e.g. at end of a test). You can also call Path::unfake().
+     */
+    public static function fake(?string $prefix = 'fake-filesystem-'): ScopedFake
     {
-        return new FakePath();
-    }
+        $rand = bin2hex(random_bytes(8));
+        $dir  = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+              . DIRECTORY_SEPARATOR
+              . $prefix . $rand;
 
-    public static function stopFaking(): void
-    {
-        self::$fakeRoot = null;
-    }
-
-    public static function setFakeRoot(string $root): void
-    {
-        self::$fakeRoot = $root;
-    }
-
-    protected function getActualPath(): string
-    {
-        if (self::$fakeRoot && !str_starts_with($this->path, '/tmp/')) {
-            // Prefix non-temp paths with fake root
-            return self::$fakeRoot . '/' . ltrim($this->path, '/');
+        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+            throw new \RuntimeException("Failed to create fake filesystem at: {$dir}");
         }
+
+        self::$base = $dir;
+
+        return new ScopedFake(
+            $dir,
+            function () {
+                Path::unfake();
+            }
+        );
+    }
+
+    /**
+     * Disable fake filesystem mode and remove the fake directory.
+     */
+    public static function unfake(): void
+    {
+        $base = self::$base;
+        self::$base = null;
+
+        if ($base && is_dir($base)) {
+            self::rrmdir($base);
+        }
+    }
+
+    /**
+     * String representation: logical path (not the temp base).
+     */
+    public function __toString(): string
+    {
         return $this->path;
     }
 
-    // Join path components
-    public function joinpath(...$parts): self
+    /**
+     * Check if path exists
+     */
+    public function exists(): bool
     {
-        $allParts = array_merge([$this->path], $parts);
-        $joined = implode(DIRECTORY_SEPARATOR, $allParts);
-        return new self($joined);
+        return file_exists($this->actual());
     }
 
-    // Path properties
-    public function name(): string
+    /**
+     * Check if path is a file
+     */
+    public function isFile(): bool
     {
-        return basename($this->path);
+        return is_file($this->actual());
     }
 
-    public function stem(): string
+    /**
+     * Check if path is a directory
+     */
+    public function isDir(): bool
     {
-        return pathinfo($this->path, PATHINFO_FILENAME);
+        return is_dir($this->actual());
     }
 
-    public function suffix(): string
+    /**
+     * Check if path is absolute
+     */
+    public function isAbsolute(): bool
     {
-        $ext = pathinfo($this->path, PATHINFO_EXTENSION);
-        return $ext ? '.' . $ext : '';
+        // Unix absolute
+        if (strpos($this->path, '/') === 0) {
+            return true;
+        }
+        // Windows absolute (C:\ or \\server\share)
+        if (preg_match('/^(?:[A-Z]:\\\\|\\\\\\\\)/i', $this->path)) {
+            return true;
+        }
+        return false;
     }
 
     public function parent(): self
     {
-        return new self(dirname($this->path));
+        $norm = $this->normalizeSeparators($this->path);
+        $parent = dirname($norm);
+        return new self($parent);
+    }
+
+    public function name(): string
+    {
+        $norm = $this->normalizeSeparators($this->path);
+        return basename($norm);
+    }
+
+    public function stem(): string
+    {
+        $name = $this->name();
+        $pos = strrpos($name, '.');
+
+        // If no dot or the only dot is leading (dotfile), stem is the whole name
+        if ($pos === false || $pos === 0) {
+            return $name;
+        }
+        return substr($name, 0, $pos);
+    }
+
+    public function suffix(): string
+    {
+        $name = $this->name();
+        $pos = strrpos($name, '.');
+
+        // No extension if no dot or the only dot is leading (dotfile)
+        if ($pos === false || $pos === 0) {
+            return '';
+        }
+        return substr($name, $pos + 1);
+    }
+
+    public function withSuffix(string $suffix): self
+    {
+        $stem = $this->stem();
+        $parent = dirname($this->normalizeSeparators($this->path));
+        $suffix = ltrim($suffix, '.');
+
+        $newName = $suffix === '' ? $stem : "{$stem}.{$suffix}";
+
+        return $parent === '.' ? new self($newName)
+                               : new self($parent . DIRECTORY_SEPARATOR . $newName);
+    }
+
+    /**
+     * Read text from file
+     */
+    public function readText(): string
+    {
+        $actual = $this->actual();
+        if (!is_file($actual)) {
+            throw new \InvalidArgumentException("Path is not a file: {$this->path}");
+        }
+        $data = file_get_contents($actual);
+        if ($data === false) {
+            throw new \RuntimeException("Failed to read: {$this->path}");
+        }
+        return $data;
+    }
+
+    /**
+     * Write text to file
+     */
+    public function writeText(string $content): void
+    {
+        $actual = $this->actual();
+        $dir = dirname($actual);
+        if (!is_dir($dir) && !mkdir($dir, 0777, true) && !is_dir($dir)) {
+            throw new \RuntimeException("Failed to create directory: {$dir}");
+        }
+        if (file_put_contents($actual, $content) === false) {
+            throw new \RuntimeException("Failed to write: {$this->path}");
+        }
     }
 
     public function parts(): array
     {
-        return array_filter(explode(DIRECTORY_SEPARATOR, $this->path));
-    }
+        $p = self::normalizeSlashes($this->path); // use forward slashes
 
-    // File operations
-    public function exists(): bool
-    {
-        return file_exists($this->getActualPath());
-    }
-
-    public function isFile(): bool
-    {
-        return is_file($this->getActualPath());
-    }
-
-    public function isDir(): bool
-    {
-        return is_dir($this->getActualPath());
-    }
-
-    public function readText(): string
-    {
-        $actualPath = $this->getActualPath();
-        if (!is_file($actualPath)) {
-            throw new InvalidArgumentException("Path is not a file: {$this->path}");
-        }
-        return file_get_contents($actualPath);
-    }
-
-    public function writeText(string $content): void
-    {
-        file_put_contents($this->getActualPath(), $content);
-    }
-
-    public function mkdir(int $mode = 0755, bool $parents = true): void
-    {
-        $actualPath = $this->getActualPath();
-        if (!file_exists($actualPath)) {
-            mkdir($actualPath, $mode, $parents);
-        }
-    }
-
-    // Iterator for directories
-    public function iterdir(): \Generator
-    {
-        $actualPath = $this->getActualPath();
-        if (!is_dir($actualPath)) {
-            throw new InvalidArgumentException("Path is not a directory: {$this->path}");
+        // Handle Windows drive like "C:/..."
+        $drive = null;
+        if (preg_match('/^([A-Za-z]:)\//', $p, $m)) {
+            $drive = $m[1];           // e.g. "C:"
+            $p = substr($p, strlen($m[0])); // strip "C:/"
         }
 
-        foreach (scandir($actualPath) as $item) {
-            if ($item !== '.' && $item !== '..') {
-                yield new self($this->path . DIRECTORY_SEPARATOR . $item);
+        // Handle UNC like "//server/share/..."
+        if (strpos($p, '//') === 0) {
+            // strip leading '//' and treat first two segments as server/share
+            $unc = substr($p, 2);
+            $segments = array_values(array_filter(explode('/', $unc), fn($s) => $s !== ''));
+            if (count($segments) >= 2) {
+                $server = array_shift($segments);
+                $share  = array_shift($segments);
+                $parts = [$server, $share, ...$segments];
+                return $drive ? array_merge([$drive], $parts) : $parts;
             }
+            // fallback: no share given
+            $p = $unc;
+        }
+
+        // For POSIX absolute paths, drop the leading slash
+        if (isset($p[0]) && $p[0] === '/') {
+            $p = substr($p, 1);
+        }
+
+        // Trim trailing slash and split
+        $p = rtrim($p, '/');
+        if ($p === '' && !$drive) {
+            return [];
+        }
+
+        $parts = $p === '' ? [] : array_values(array_filter(explode('/', $p), fn($s) => $s !== ''));
+
+        // Prepend drive if present
+        if ($drive) {
+            array_unshift($parts, $drive);
+        }
+
+        return $parts;
+    }
+
+    /**
+     * Join path with another
+     */
+    public function joinpath(string ...$parts): self
+    {
+        $combined = $this->path;
+        foreach ($parts as $part) {
+            $combined = rtrim($combined, '/\\') . DIRECTORY_SEPARATOR . ltrim($part, '/\\');
+        }
+        return new self($combined);
+    }
+
+    /**
+     * Create directory (including parents)
+     */
+    public function mkdir(bool $parents = false, int $mode = 0777): void
+    {
+        $actual = $this->actual();
+        if (!is_dir($actual) && !mkdir($actual, $mode, $parents) && !is_dir($actual)) {
+            throw new \RuntimeException("Failed to create directory: {$this->path}");
         }
     }
 
-    // Glob pattern matching
-    public function glob(string $pattern): array
+    /**
+     * Iterate directory contents (returns Path[])
+     */
+    public function iterdir(): array
     {
-        $fullPattern = $this->joinpath($pattern);
-        $actualPattern = str_replace($this->path, $this->getActualPath(), (string)$fullPattern);
-        $results = glob($actualPattern);
-
-        return array_map(function($actualPath) {
-            $virtualPath = str_replace($this->getActualPath(), $this->path, $actualPath);
-            return new self($virtualPath);
-        }, $results ?: []);
-    }
-
-    // Path resolution
-    public function resolve(): self
-    {
-        return new self(realpath($this->getActualPath()) ?: $this->path);
-    }
-
-    public function relative(self $other): self
-    {
-        $from = $this->resolve()->parts();
-        $to = $other->resolve()->parts();
-
-        // Find common prefix
-        $common = 0;
-        while ($common < min(count($from), count($to)) && $from[$common] === $to[$common]) {
-            $common++;
+        $actual = $this->actual();
+        if (!is_dir($actual)) {
+            throw new \InvalidArgumentException("Path is not a directory: {$this->path}");
         }
 
-        // Build relative path
-        $ups = str_repeat('..' . DIRECTORY_SEPARATOR, count($from) - $common);
-        $downs = implode(DIRECTORY_SEPARATOR, array_slice($to, $common));
+        $items = [];
+        $entries = scandir($actual);
+        if ($entries === false) {
+            throw new \RuntimeException("Failed to read dir: {$this->path}");
+        }
 
-        return new self(rtrim($ups . $downs, DIRECTORY_SEPARATOR) ?: '.');
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $items[] = new self($this->path . DIRECTORY_SEPARATOR . $entry);
+        }
+        return $items;
     }
 
-    // Utility methods
-    public function withSuffix(string $suffix): self
+    public function glob(?string $pattern = null): array
     {
-        $stem = $this->stem();
-        $parent = $this->parent();
-        return $parent->joinpath($stem . $suffix);
+        $isDir = $this->isDir();
+        $dirActual = $isDir ? $this->actual() : dirname($this->actual());
+        $dirLogical = $isDir ? $this->path : dirname($this->path);
+
+        $pat = $pattern ?? ($isDir ? '*' : basename($this->path));
+        $matches = glob(rtrim($dirActual, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $pat) ?: [];
+
+        $out = [];
+        foreach ($matches as $full) {
+            $logical = rtrim($dirLogical, "/\\") . DIRECTORY_SEPARATOR . basename($full);
+            $out[] = new self($logical);
+        }
+        return $out;
     }
 
+    /**
+     * Change filename
+     */
     public function withName(string $name): self
     {
-        return $this->parent()->joinpath($name);
+        $parent = dirname($this->path);
+        return $parent === '.' ? new self($name)
+                               : new self($parent . DIRECTORY_SEPARATOR . $name);
     }
 
-    private function normalize(string $path): string
+    /**
+     * Expand ~ to home directory
+     */
+    public function expanduser(): self
     {
-        // Handle empty path
-        if (empty($path)) {
-            return getcwd();
+        if (strpos($this->path, '~') === 0) {
+            $home = getenv('HOME') ?: ($_SERVER['HOME'] ?? null);
+            if (!$home && function_exists('posix_getpwuid')) {
+                $home = posix_getpwuid(posix_getuid())['dir'] ?? null;
+            }
+            $expanded = ($home ?: '~') . substr($this->path, 1);
+            return new self($expanded);
+        }
+        return $this;
+    }
+
+    /**
+     * Resolve to a normalized logical path (doesn't escape the fake base).
+     * If the actual path exists on a real FS, use realpath for normalization.
+     */
+    public function resolve(): self
+    {
+        $actual = $this->actual();
+
+        if (file_exists($actual)) {
+            $real = realpath($actual);
+            if ($real === false) {
+                // Fall through to manual normalization
+                $real = $actual;
+            }
+            // Strip base when mapping back to logical path
+            $logical = self::$base
+                ? ltrim(substr($real, strlen(self::$base)), DIRECTORY_SEPARATOR)
+                : $real;
+            return new self(self::normalizeSlashes($logical));
         }
 
-        // Expand ~ to home directory
-        if ($path[0] === '~') {
-            $home = $_SERVER['HOME'] ?? $_SERVER['USERPROFILE'] ?? posix_getpwuid(posix_getuid())['dir'] ?? '/';
-            $path = $home . substr($path, 1);
-        }
+        // Manual normalization for non-existent paths
+        $p = self::normalizeSlashes($this->path);
+        $isAbs = strlen($p) > 0 && $p[0] === '/';
 
-        // Convert all slashes to system separator
-        $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
-
-        // Split path into parts for processing
-        $isAbsolute = $path[0] === DIRECTORY_SEPARATOR;
-        $parts = array_filter(explode(DIRECTORY_SEPARATOR, $path), fn($part) => $part !== '');
-
-        // Resolve . and .. components
-        $resolved = [];
-        foreach ($parts as $part) {
-            if ($part === '.') {
-                continue; // Skip current directory references
-            } elseif ($part === '..') {
-                if (!empty($resolved) && end($resolved) !== '..') {
-                    array_pop($resolved); // Go up one level
-                } elseif (!$isAbsolute) {
-                    $resolved[] = '..'; // Keep .. for relative paths
-                }
-                // For absolute paths, ignore .. at root
+        $parts = array_values(array_filter(explode('/', $p), fn($x) => $x !== ''));
+        $stack = [];
+        foreach ($parts as $seg) {
+            if ($seg === '.') {
+                continue;
+            }
+            if ($seg === '..') {
+                array_pop($stack);
             } else {
-                $resolved[] = $part;
+                $stack[] = $seg;
             }
         }
-
-        // Rebuild path
-        $normalizedPath = implode(DIRECTORY_SEPARATOR, $resolved);
-
-        if ($isAbsolute) {
-            $normalizedPath = DIRECTORY_SEPARATOR . $normalizedPath;
-        } elseif (empty($normalizedPath)) {
-            $normalizedPath = '.';
+        $res = implode('/', $stack);
+        if ($isAbs) {
+            $res = '/' . $res;
         }
+        return new self($res === '' ? ($isAbs ? '/' : '.') : $res);
+    }
 
-        return $normalizedPath;
+    /**
+     * Return actual filesystem path (string), applying fake base if active.
+     */
+    private function actual(): string
+    {
+        if (self::$base === null) {
+            return $this->path;
+        }
+        // Always sandbox under the base
+        $relative = ltrim($this->normalizeSeparators($this->path), '/\\');
+        return rtrim(self::$base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $relative;
+    }
+
+    /**
+     * Normalize path separators to forward slashes for logical paths.
+     */
+    private static function normalizeSlashes(string $path): string
+    {
+        return str_replace('\\', '/', $path);
+    }
+
+    /**
+     * Normalize separators to the current OS separator.
+     */
+    private function normalizeSeparators(string $path): string
+    {
+        return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+    }
+
+    /**
+     * Recursively remove a directory.
+     */
+    private static function rrmdir(string $dir): void
+    {
+        if (!is_dir($dir)) {
+            return;
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterator as $file) {
+            /** @var \SplFileInfo $file */
+            if ($file->isDir()) {
+                rmdir($file->getPathname());
+            } else {
+                @chmod($file->getPathname(), 0666); // best effort
+                unlink($file->getPathname());
+            }
+        }
+        rmdir($dir);
     }
 }
 
-class FakePath
+/**
+ * Small guard object for scoped fake filesystem.
+ * Keep it public so test code can type-hint if desired.
+ */
+final class ScopedFake
 {
-    private string $tempDir;
+    private string $base;
+    /** @var callable():void */
+    private $onClose;
 
-    public function __construct()
+    /**
+     * @param callable():void $onClose
+     */
+    public function __construct(string $base, callable $onClose)
     {
-        $this->tempDir = sys_get_temp_dir() . '/pathlib_fake_' . uniqid();
-        mkdir($this->tempDir, 0755, true);
-        Path::setFakeRoot($this->tempDir);
+        $this->base = $base;
+        $this->onClose = $onClose;
     }
 
-    public function of(string $path): Path
+    public function base(): string
     {
-        return Path::of($path);
+        return $this->base;
     }
 
-    public function cleanup(): void
+    public function __destruct()
     {
-        $this->removeDirectory($this->tempDir);
-        Path::stopFaking();
-    }
-
-    public function getTempDir(): string
-    {
-        return $this->tempDir;
-    }
-
-    private function removeDirectory(string $dir): void
-    {
-        if (!is_dir($dir)) return;
-
-        $files = array_diff(scandir($dir), ['.', '..']);
-        foreach ($files as $file) {
-            $path = $dir . DIRECTORY_SEPARATOR . $file;
-            is_dir($path) ? $this->removeDirectory($path) : unlink($path);
-        }
-        rmdir($dir);
+        // Ensure cleanup even if the test forgets to call Path::unfake()
+        ($this->onClose)();
     }
 }
